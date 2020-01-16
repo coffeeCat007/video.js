@@ -3,7 +3,7 @@
  * @module middleware
  */
 import { assign } from '../utils/obj.js';
-import toTitleCase from '../utils/to-title-case.js';
+import {toTitleCase} from '../utils/string-cases.js';
 
 const middlewares = {};
 const middlewareInstances = {};
@@ -184,9 +184,11 @@ export const allowedGetters = {
   buffered: 1,
   currentTime: 1,
   duration: 1,
-  seekable: 1,
+  muted: 1,
   played: 1,
-  paused: 1
+  paused: 1,
+  seekable: 1,
+  volume: 1
 };
 
 /**
@@ -195,7 +197,9 @@ export const allowedGetters = {
  * @type {Object}
  */
 export const allowedSetters = {
-  setCurrentTime: 1
+  setCurrentTime: 1,
+  setMuted: 1,
+  setVolume: 1
 };
 
 /**

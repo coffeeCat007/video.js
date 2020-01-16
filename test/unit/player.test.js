@@ -14,6 +14,8 @@ import sinon from 'sinon';
 import window from 'global/window';
 import * as middleware from '../../src/js/tech/middleware.js';
 import * as Events from '../../src/js/utils/events.js';
+import pkg from '../../package.json';
+import * as Guid from '../../src/js/utils/guid.js';
 
 QUnit.module('Player', {
   beforeEach() {
@@ -29,6 +31,17 @@ QUnit.module('Player', {
   afterEach() {
     this.clock.restore();
   }
+});
+
+QUnit.test('the default ID of the first player remains "vjs_video_3"', function(assert) {
+  Guid.resetGuidInTestsOnly();
+  const tag = document.createElement('video');
+
+  tag.className = 'video-js';
+
+  const player = TestHelpers.makePlayer({}, tag);
+
+  assert.strictEqual(player.id(), 'vjs_video_3', 'id is correct');
 });
 
 QUnit.test('should create player instance that inherits from component and dispose it', function(assert) {
@@ -336,6 +349,80 @@ QUnit.test('should asynchronously fire error events during source selection', fu
   log.error.restore();
 });
 
+QUnit.test('should suppress source error messages', function(assert) {
+  sinon.stub(log, 'error');
+  const clock = sinon.useFakeTimers();
+
+  const player = TestHelpers.makePlayer({
+    techOrder: ['foo'],
+    suppressNotSupportedError: true
+  });
+
+  let errors = 0;
+
+  player.on('error', function(e) {
+    errors++;
+  });
+
+  player.src({src: 'http://example.com', type: 'video/mp4'});
+
+  clock.tick(10);
+
+  assert.strictEqual(errors, 0, 'no error on bad source load');
+
+  player.trigger('click');
+
+  clock.tick(10);
+
+  assert.strictEqual(errors, 1, 'error after click');
+
+  player.dispose();
+
+  assert.strictEqual(log.error.callCount, 2, 'two stubbed errors');
+  log.error.restore();
+});
+
+QUnit.test('should cancel a suppressed error message on loadstart', function(assert) {
+  sinon.stub(log, 'error');
+  const clock = sinon.useFakeTimers();
+
+  const player = TestHelpers.makePlayer({
+    techOrder: ['foo'],
+    suppressNotSupportedError: true
+  });
+
+  let errors = 0;
+
+  player.on('error', function(e) {
+    errors++;
+  });
+
+  player.src({src: 'http://example.com', type: 'video/mp4'});
+
+  clock.tick(10);
+
+  assert.strictEqual(errors, 0, 'no error on bad source load');
+  assert.strictEqual(
+    player.options_.suppressNotSupportedError,
+    false,
+    'option was unset when error was suppressed'
+  );
+
+  player.trigger('loadstart');
+
+  clock.tick(10);
+
+  player.trigger('click');
+
+  clock.tick(10);
+
+  assert.strictEqual(errors, 0, 'no error after click after loadstart');
+  assert.strictEqual(log.error.callCount, 3, 'one stubbed errors');
+
+  player.dispose();
+  log.error.restore();
+});
+
 QUnit.test('should set the width, height, and aspect ratio via a css class', function(assert) {
   const player = TestHelpers.makePlayer();
   const getStyleText = function(styleEl) {
@@ -629,13 +716,13 @@ QUnit.test('should add a touch-enabled classname when touch is supported', funct
   // Fake touch support. Real touch support isn't needed for this test.
   const origTouch = browser.TOUCH_ENABLED;
 
-  browser.TOUCH_ENABLED = true;
+  browser.stub_TOUCH_ENABLED(true);
 
   const player = TestHelpers.makePlayer({});
 
   assert.notEqual(player.el().className.indexOf('vjs-touch-enabled'), -1, 'touch-enabled classname added');
 
-  browser.TOUCH_ENABLED = origTouch;
+  browser.stub_TOUCH_ENABLED(origTouch);
   player.dispose();
 });
 
@@ -645,13 +732,13 @@ QUnit.test('should not add a touch-enabled classname when touch is not supported
   // Fake not having touch support in case that the browser running the test supports it
   const origTouch = browser.TOUCH_ENABLED;
 
-  browser.TOUCH_ENABLED = false;
+  browser.stub_TOUCH_ENABLED(false);
 
   const player = TestHelpers.makePlayer({});
 
   assert.equal(player.el().className.indexOf('vjs-touch-enabled'), -1, 'touch-enabled classname not added');
 
-  browser.TOUCH_ENABLED = origTouch;
+  browser.stub_TOUCH_ENABLED(origTouch);
   player.dispose();
 });
 
@@ -1491,6 +1578,7 @@ QUnit.test('player#reset removes the poster', function(assert) {
 });
 
 QUnit.test('player#reset removes remote text tracks', function(assert) {
+  sinon.stub(log, 'warn');
   const player = TestHelpers.makePlayer();
 
   this.clock.tick(1);
@@ -1505,6 +1593,8 @@ QUnit.test('player#reset removes remote text tracks', function(assert) {
   assert.strictEqual(player.remoteTextTracks().length, 1, 'there is one RTT');
   player.reset();
   assert.strictEqual(player.remoteTextTracks().length, 0, 'there are zero RTTs');
+  assert.strictEqual(log.warn.callCount, 1, 'one warning about for manualCleanup');
+  log.warn.restore();
 });
 
 QUnit.test('Remove waiting class after tech waiting when timeupdate shows a time change', function(assert) {
@@ -1687,6 +1777,8 @@ QUnit.test('should not allow to register custom player when any player has been 
 
 QUnit.test('techGet runs through middleware if allowedGetter', function(assert) {
   let cts = 0;
+  let muts = 0;
+  let vols = 0;
   let durs = 0;
   let lps = 0;
 
@@ -1699,6 +1791,12 @@ QUnit.test('techGet runs through middleware if allowedGetter', function(assert) 
     },
     loop() {
       lps++;
+    },
+    muted() {
+      muts++;
+    },
+    volume() {
+      vols++;
     }
   }));
 
@@ -1714,11 +1812,15 @@ QUnit.test('techGet runs through middleware if allowedGetter', function(assert) 
   player.middleware_ = [middleware.getMiddleware('video/foo')[0](player)];
 
   player.techGet_('currentTime');
+  player.techGet_('volume');
   player.techGet_('duration');
   player.techGet_('loop');
+  player.techGet_('muted');
 
   assert.equal(cts, 1, 'currentTime is allowed');
+  assert.equal(vols, 1, 'volume is allowed');
   assert.equal(durs, 1, 'duration is allowed');
+  assert.equal(muts, 1, 'muted is allowed');
   assert.equal(lps, 0, 'loop is not allowed');
 
   middleware.getMiddleware('video/foo').pop();
@@ -1727,7 +1829,9 @@ QUnit.test('techGet runs through middleware if allowedGetter', function(assert) 
 
 QUnit.test('techCall runs through middleware if allowedSetter', function(assert) {
   let cts = 0;
+  let muts = false;
   let vols = 0;
+  let prs = 0;
 
   videojs.use('video/foo', () => ({
     setCurrentTime(ct) {
@@ -1736,6 +1840,15 @@ QUnit.test('techCall runs through middleware if allowedSetter', function(assert)
     },
     setVolume() {
       vols++;
+      return vols;
+    },
+    setMuted() {
+      muts = true;
+      return muts;
+    },
+    setPlaybackRate() {
+      prs++;
+      return prs;
     }
   }));
 
@@ -1754,11 +1867,15 @@ QUnit.test('techCall runs through middleware if allowedSetter', function(assert)
 
   player.techCall_('setCurrentTime', 10);
   player.techCall_('setVolume', 0.5);
+  player.techCall_('setMuted', true);
+  player.techCall_('setPlaybackRate', 0.75);
 
   this.clock.tick(1);
 
   assert.equal(cts, 1, 'setCurrentTime is allowed');
-  assert.equal(vols, 0, 'setVolume is not allowed');
+  assert.equal(vols, 1, 'setVolume is allowed');
+  assert.equal(muts, true, 'setMuted is allowed');
+  assert.equal(prs, 0, 'setPlaybackRate is not allowed');
 
   middleware.getMiddleware('video/foo').pop();
   player.dispose();
@@ -1893,7 +2010,7 @@ QUnit.test('options: plugins', function(assert) {
 });
 
 QUnit.test('should add a class with major version', function(assert) {
-  const majorVersion = require('../../package.json').version.split('.')[0];
+  const majorVersion = pkg.version.split('.')[0];
   const player = TestHelpers.makePlayer();
 
   assert.ok(player.hasClass('vjs-v' + majorVersion), 'the version class should be added to the player');
@@ -1951,7 +2068,7 @@ QUnit.test('setPoster in tech with `techCanOverridePoster` in player should over
   assert.equal(player.poster(), firstPosterUrl, "ensure tech didn't change poster after setting from player");
   assert.equal(player.isPosterFromTech_, false, "ensure player didn't mark poster as changed by the tech");
 
-  posterchangeSpy.reset();
+  posterchangeSpy.resetHistory();
 
   player.tech_.setPoster(techPosterUrl);
   assert.ok(posterchangeSpy.calledOnce, "posterchangeSpy should've been called");
@@ -1976,7 +2093,7 @@ QUnit.test('setPoster in tech WITHOUT `techCanOverridePoster` in player should N
   assert.equal(player.poster(), firstPosterUrl, "ensure tech didn't change poster after setting from player");
   assert.equal(player.isPosterFromTech_, false, "ensure player didn't mark poster as changed by the tech");
 
-  posterchangeSpy.reset();
+  posterchangeSpy.resetHistory();
 
   player.tech_.setPoster(techPosterUrl);
   assert.ok(posterchangeSpy.notCalled, "posterchangeSpy shouldn't have been called");

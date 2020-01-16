@@ -155,10 +155,10 @@ QUnit.test('update texttrack buttons on removetrack or addtrack', function(asser
     oldSubsCapsUpdate.call(this);
   };
 
-  Tech.prototype.featuresNativeTextTracks = true;
-
+  const oldFeaturesNativeTextTracks = Tech.prototype.featuresNativeTextTracks;
   const oldTextTracks = Tech.prototype.textTracks;
 
+  Tech.prototype.featuresNativeTextTracks = true;
   Tech.prototype.textTracks = function() {
     return {
       length: 0,
@@ -213,11 +213,12 @@ QUnit.test('update texttrack buttons on removetrack or addtrack', function(asser
   assert.equal(update, 15, 'update was called on the five buttons for remove track');
 
   Tech.prototype.textTracks = oldTextTracks;
-  Tech.prototype.featuresNativeTextTracks = false;
+  Tech.prototype.featuresNativeTextTracks = oldFeaturesNativeTextTracks;
   CaptionsButton.prototype.update = oldCaptionsUpdate;
   SubtitlesButton.prototype.update = oldSubsUpdate;
   ChaptersButton.prototype.update = oldChaptersUpdate;
   SubsCapsButton.prototype.update = oldSubsCapsUpdate;
+  DescriptionsButton.prototype.update = oldDescriptionsUpdate;
 
   player.dispose();
 });
@@ -230,16 +231,16 @@ QUnit.test('emulated tracks are always used, except in safari', function(assert)
     textTracks: []
   };
 
-  browser.IS_ANY_SAFARI = false;
+  browser.stub_IS_ANY_SAFARI(false);
 
   assert.ok(!Html5.supportsNativeTextTracks(), 'Html5 does not support native text tracks, in non-safari');
 
-  browser.IS_ANY_SAFARI = true;
+  browser.stub_IS_ANY_SAFARI(true);
 
   assert.ok(Html5.supportsNativeTextTracks(), 'Html5 does support native text tracks in safari');
 
   Html5.TEST_VID = oldTestVid;
-  browser.IS_ANY_SAFARI = oldIsAnySafari;
+  browser.stub_IS_ANY_SAFARI(oldIsAnySafari);
 });
 
 QUnit.test('when switching techs, we should not get a new text track', function(assert) {

@@ -7,7 +7,6 @@ import Component from './component.js';
 import {version} from '../../package.json';
 import document from 'global/document';
 import window from 'global/window';
-import tsml from 'tsml';
 import evented from './mixins/evented';
 import {isEvented, addEventedCallback} from './mixins/evented';
 import * as Events from './utils/events.js';
@@ -15,13 +14,13 @@ import * as Dom from './utils/dom.js';
 import * as Fn from './utils/fn.js';
 import * as Guid from './utils/guid.js';
 import * as browser from './utils/browser.js';
-import {IE_VERSION} from './utils/browser.js';
+import {IE_VERSION, IS_CHROME, IS_WINDOWS} from './utils/browser.js';
 import log, { createLogger } from './utils/log.js';
-import toTitleCase, { titleCaseEquals } from './utils/to-title-case.js';
+import {toTitleCase, titleCaseEquals} from './utils/string-cases.js';
 import { createTimeRange } from './utils/time-ranges.js';
 import { bufferedPercent } from './utils/buffer.js';
 import * as stylesheet from './utils/stylesheet.js';
-import FullscreenApi, {prefixedAPI as prefixedFS} from './fullscreen-api.js';
+import FullscreenApi from './fullscreen-api.js';
 import MediaError from './media-error.js';
 import safeParseTuple from 'safe-json-parse/tuple';
 import {assign} from './utils/obj';
@@ -354,10 +353,12 @@ class Player extends Component {
     // Create bound methods for document listeners.
     this.boundDocumentFullscreenChange_ = Fn.bind(this, this.documentFullscreenChange_);
     this.boundFullWindowOnEscKey_ = Fn.bind(this, this.fullWindowOnEscKey);
-    this.boundHandleKeyPress_ = Fn.bind(this, this.handleKeyPress);
 
     // create logger
     this.log = createLogger(this.id_);
+
+    // Hold our own reference to fullscreen api so it can be mocked in tests
+    this.fsApi_ = FullscreenApi;
 
     // Tracks when a tech changes the poster
     this.isPosterFromTech_ = false;
@@ -532,9 +533,8 @@ class Player extends Component {
     this.reportUserActivity();
 
     this.one('play', this.listenForUserActivity_);
-    this.on('focus', this.handleFocus);
-    this.on('blur', this.handleBlur);
     this.on('stageclick', this.handleStageClick_);
+    this.on('keydown', this.handleKeyDown);
 
     this.breakpoints(this.options_.breakpoints);
     this.responsive(this.options_.responsive);
@@ -561,9 +561,8 @@ class Player extends Component {
     this.off('dispose');
 
     // Make sure all player-specific document listeners are unbound. This is
-    Events.off(document, FullscreenApi.fullscreenchange, this.boundDocumentFullscreenChange_);
+    Events.off(document, this.fsApi_.fullscreenchange, this.boundDocumentFullscreenChange_);
     Events.off(document, 'keydown', this.boundFullWindowOnEscKey_);
-    Events.off(document, 'keydown', this.boundHandleKeyPress_);
 
     if (this.styleEl_ && this.styleEl_.parentNode) {
       this.styleEl_.parentNode.removeChild(this.styleEl_);
@@ -656,7 +655,11 @@ class Player extends Component {
       // `src` or `controls` that were set via js before the player
       // was initialized.
       Object.keys(el).forEach((k) => {
-        tag[k] = el[k];
+        try {
+          tag[k] = el[k];
+        } catch (e) {
+          // we got a a property like outerHTML which we can't actually copy, ignore it
+        }
       });
     }
 
@@ -664,11 +667,12 @@ class Player extends Component {
     tag.setAttribute('tabindex', '-1');
     attrs.tabindex = '-1';
 
-    // Workaround for #4583 (JAWS+IE doesn't announce BPB or play button)
+    // Workaround for #4583 (JAWS+IE doesn't announce BPB or play button), and
+    // for the same issue with Chrome (on Windows) with JAWS.
     // See https://github.com/FreedomScientific/VFO-standards-support/issues/78
     // Note that we can't detect if JAWS is being used, but this ARIA attribute
-    //  doesn't change behavior of IE11 if JAWS is not being used
-    if (IE_VERSION) {
+    //  doesn't change behavior of IE11 or Chrome if JAWS is not being used
+    if (IE_VERSION || (IS_CHROME && IS_WINDOWS)) {
       tag.setAttribute('role', 'application');
       attrs.role = 'application';
     }
@@ -816,7 +820,7 @@ class Player extends Component {
       return this[privDimension] || 0;
     }
 
-    if (value === '') {
+    if (value === '' || value === 'auto') {
       // If an empty string is given, reset the dimension to be automatic
       this[privDimension] = undefined;
       this.updateStyleEl_();
@@ -1078,7 +1082,8 @@ class Player extends Component {
       'playerElIngest': this.playerElIngest_ || false,
       'vtt.js': this.options_['vtt.js'],
       'canOverridePoster': !!this.options_.techCanOverridePoster,
-      'enableSourceset': this.options_.enableSourceset
+      'enableSourceset': this.options_.enableSourceset,
+      'Promise': this.options_.Promise
     };
 
     TRACK_TYPES.names.forEach((name) => {
@@ -1141,6 +1146,8 @@ class Player extends Component {
     this.on(this.tech_, 'pause', this.handleTechPause_);
     this.on(this.tech_, 'durationchange', this.handleTechDurationChange_);
     this.on(this.tech_, 'fullscreenchange', this.handleTechFullscreenChange_);
+    this.on(this.tech_, 'enterpictureinpicture', this.handleTechEnterPictureInPicture_);
+    this.on(this.tech_, 'leavepictureinpicture', this.handleTechLeavePictureInPicture_);
     this.on(this.tech_, 'error', this.handleTechError_);
     this.on(this.tech_, 'loadedmetadata', this.updateStyleEl_);
     this.on(this.tech_, 'posterchange', this.handleTechPosterChange_);
@@ -1207,10 +1214,8 @@ class Player extends Component {
    */
   tech(safety) {
     if (safety === undefined) {
-      log.warn(tsml`
-        Using the tech directly can be dangerous. I hope you know what you're doing.
-        See https://github.com/videojs/video.js/issues/2617 for more info.
-      `);
+      log.warn('Using the tech directly can be dangerous. I hope you know what you\'re doing.\n' +
+        'See https://github.com/videojs/video.js/issues/2617 for more info.\n');
     }
 
     return this.tech_;
@@ -1245,7 +1250,7 @@ class Player extends Component {
     // trigger mousedown/up.
     // http://stackoverflow.com/questions/1444562/javascript-onclick-event-over-flash-object
     // Any touch events are set to block the mousedown event from happening
-    this.on(this.tech_, 'mousedown', this.handleTechClick_);
+    this.on(this.tech_, 'mouseup', this.handleTechClick_);
     this.on(this.tech_, 'dblclick', this.handleTechDoubleClick_);
 
     // If the controls were hidden we don't want that to change without a tap event
@@ -1273,7 +1278,7 @@ class Player extends Component {
     this.off(this.tech_, 'touchstart', this.handleTechTouchStart_);
     this.off(this.tech_, 'touchmove', this.handleTechTouchMove_);
     this.off(this.tech_, 'touchend', this.handleTechTouchEnd_);
-    this.off(this.tech_, 'mousedown', this.handleTechClick_);
+    this.off(this.tech_, 'mouseup', this.handleTechClick_);
     this.off(this.tech_, 'dblclick', this.handleTechDoubleClick_);
   }
 
@@ -1524,20 +1529,20 @@ class Player extends Component {
       // if the `sourceset` `src` was an empty string
       // wait for a `loadstart` to update the cache to `currentSrc`.
       // If a sourceset happens before a `loadstart`, we reset the state
-      // as this function will be called again.
       if (!event.src) {
-        const updateCache = (e) => {
-          if (e.type !== 'sourceset') {
-            const techSrc = this.techGet('currentSrc');
-
-            this.lastSource_.tech = techSrc;
-            this.updateSourceCaches_(techSrc);
+        this.tech_.any(['sourceset', 'loadstart'], (e) => {
+          // if a sourceset happens before a `loadstart` there
+          // is nothing to do as this `handleTechSourceset_`
+          // will be called again and this will be handled there.
+          if (e.type === 'sourceset') {
+            return;
           }
 
-          this.tech_.off(['sourceset', 'loadstart'], updateCache);
-        };
+          const techSrc = this.techGet('currentSrc');
 
-        this.tech_.one(['sourceset', 'loadstart'], updateCache);
+          this.lastSource_.tech = techSrc;
+          this.updateSourceCaches_(techSrc);
+        });
       }
     }
     this.lastSource_ = {player: this.currentSource().src, tech: event.src};
@@ -1844,7 +1849,7 @@ class Player extends Component {
    * @param {EventTarget~Event} event
    *        the event that caused this function to trigger
    *
-   * @listens Tech#mousedown
+   * @listens Tech#mouseup
    * @private
    */
   handleTechClick_(event) {
@@ -1992,16 +1997,23 @@ class Player extends Component {
    * when the document fschange event triggers it calls this
    */
   documentFullscreenChange_(e) {
-    const fsApi = FullscreenApi;
+    const el = this.el();
+    let isFs = document[this.fsApi_.fullscreenElement] === el;
 
-    this.isFullscreen(document[fsApi.fullscreenElement] === this.el() || this.el().matches(':' + fsApi.fullscreen));
+    if (!isFs && el.matches) {
+      isFs = el.matches(':' + this.fsApi_.fullscreen);
+    } else if (!isFs && el.msMatchesSelector) {
+      isFs = el.msMatchesSelector(':' + this.fsApi_.fullscreen);
+    }
+
+    this.isFullscreen(isFs);
 
     // If cancelling fullscreen, remove event listener.
     if (this.isFullscreen() === false) {
-      Events.off(document, fsApi.fullscreenchange, this.boundDocumentFullscreenChange_);
+      Events.off(document, this.fsApi_.fullscreenchange, this.boundDocumentFullscreenChange_);
     }
 
-    if (!prefixedFS) {
+    if (this.fsApi_.prefixed) {
       /**
        * @event Player#fullscreenchange
        * @type {EventTarget~Event}
@@ -2035,6 +2047,43 @@ class Player extends Component {
      * @type {EventTarget~Event}
      */
     this.trigger('fullscreenchange');
+  }
+
+  /**
+   * @private
+   */
+  togglePictureInPictureClass_() {
+    if (this.isInPictureInPicture()) {
+      this.addClass('vjs-picture-in-picture');
+    } else {
+      this.removeClass('vjs-picture-in-picture');
+    }
+  }
+
+  /**
+   * Handle Tech Enter Picture-in-Picture.
+   *
+   * @param {EventTarget~Event} event
+   *        the enterpictureinpicture event that triggered this function
+   *
+   * @private
+   * @listens Tech#enterpictureinpicture
+   */
+  handleTechEnterPictureInPicture_(event) {
+    this.isInPictureInPicture(true);
+  }
+
+  /**
+   * Handle Tech Leave Picture-in-Picture.
+   *
+   * @param {EventTarget~Event} event
+   *        the leavepictureinpicture event that triggered this function
+   *
+   * @private
+   * @listens Tech#leavepictureinpicture
+   */
+  handleTechLeavePictureInPicture_(event) {
+    this.isInPictureInPicture(false);
   }
 
   /**
@@ -2665,14 +2714,17 @@ class Player extends Component {
    * This includes most mobile devices (iOS, Android) and older versions of
    * Safari.
    *
+   * @param  {Object} [fullscreenOptions]
+   *         Override the player fullscreen options
+   *
    * @fires Player#fullscreenchange
    */
-  requestFullscreen() {
-    const fsApi = FullscreenApi;
+  requestFullscreen(fullscreenOptions) {
+    let fsOptions;
 
     this.isFullscreen(true);
 
-    if (fsApi.requestFullscreen) {
+    if (this.fsApi_.requestFullscreen) {
       // the browser supports going fullscreen at the element level so we can
       // take the controls fullscreen as well as the video
 
@@ -2681,10 +2733,17 @@ class Player extends Component {
       // when canceling fullscreen. Otherwise if there's multiple
       // players on a page, they would all be reacting to the same fullscreen
       // events
-      Events.on(document, fsApi.fullscreenchange, this.boundDocumentFullscreenChange_);
+      Events.on(document, this.fsApi_.fullscreenchange, this.boundDocumentFullscreenChange_);
 
-      this.el_[fsApi.requestFullscreen]();
+      // only pass FullscreenOptions to requestFullscreen if it isn't prefixed
+      if (!this.fsApi_.prefixed) {
+        fsOptions = this.options_.fullscreen && this.options_.fullscreen.options || {};
+        if (fullscreenOptions !== undefined) {
+          fsOptions = fullscreenOptions;
+        }
+      }
 
+      silencePromise(this.el_[this.fsApi_.requestFullscreen](fsOptions));
     } else if (this.tech_.supportsFullScreen()) {
       // we can't take the video.js controls fullscreen but we can go fullscreen
       // with native controls
@@ -2707,13 +2766,11 @@ class Player extends Component {
    * @fires Player#fullscreenchange
    */
   exitFullscreen() {
-    const fsApi = FullscreenApi;
-
     this.isFullscreen(false);
 
     // Check for browser element fullscreen support
-    if (fsApi.requestFullscreen) {
-      document[fsApi.exitFullscreen]();
+    if (this.fsApi_.requestFullscreen) {
+      silencePromise(document[this.fsApi_.exitFullscreen]());
     } else if (this.tech_.supportsFullScreen()) {
       this.techCall_('exitFullScreen');
     } else {
@@ -2796,32 +2853,69 @@ class Player extends Component {
   }
 
   /**
-   * This gets called when a `Player` gains focus via a `focus` event.
-   * Turns on listening for `keydown` events. When they happen it
-   * calls `this.handleKeyPress`.
+   * Check if the player is in Picture-in-Picture mode or tell the player that it
+   * is or is not in Picture-in-Picture mode.
    *
-   * @param {EventTarget~Event} event
-   *        The `focus` event that caused this function to be called.
+   * @param  {boolean} [isPiP]
+   *         Set the players current Picture-in-Picture state
    *
-   * @listens focus
+   * @return {boolean}
+   *         - true if Picture-in-Picture is on and getting
+   *         - false if Picture-in-Picture is off and getting
    */
-  handleFocus(event) {
-    // call off first to make sure we don't keep adding keydown handlers
-    Events.off(document, 'keydown', this.boundHandleKeyPress_);
-    Events.on(document, 'keydown', this.boundHandleKeyPress_);
+  isInPictureInPicture(isPiP) {
+    if (isPiP !== undefined) {
+      this.isInPictureInPicture_ = !!isPiP;
+      this.togglePictureInPictureClass_();
+      return;
+    }
+    return !!this.isInPictureInPicture_;
   }
 
   /**
-   * Called when a `Player` loses focus. Turns off the listener for
-   * `keydown` events. Which Stops `this.handleKeyPress` from getting called.
+   * Create a floating video window always on top of other windows so that users may
+   * continue consuming media while they interact with other content sites, or
+   * applications on their device.
    *
-   * @param {EventTarget~Event} event
-   *        The `blur` event that caused this function to be called.
+   * @see [Spec]{@link https://wicg.github.io/picture-in-picture}
    *
-   * @listens blur
+   * @fires Player#enterpictureinpicture
+   *
+   * @return {Promise}
+   *         A promise with a Picture-in-Picture window.
    */
-  handleBlur(event) {
-    Events.off(document, 'keydown', this.boundHandleKeyPress_);
+  requestPictureInPicture() {
+    if ('pictureInPictureEnabled' in document) {
+      /**
+       * This event fires when the player enters picture in picture mode
+       *
+       * @event Player#enterpictureinpicture
+       * @type {EventTarget~Event}
+       */
+      return this.techGet_('requestPictureInPicture');
+    }
+  }
+
+  /**
+   * Exit Picture-in-Picture mode.
+   *
+   * @see [Spec]{@link https://wicg.github.io/picture-in-picture}
+   *
+   * @fires Player#leavepictureinpicture
+   *
+   * @return {Promise}
+   *         A promise.
+   */
+  exitPictureInPicture() {
+    if ('pictureInPictureEnabled' in document) {
+      /**
+       * This event fires when the player leaves picture in picture mode
+       *
+       * @event Player#leavepictureinpicture
+       * @type {EventTarget~Event}
+       */
+      return document.exitPictureInPicture();
+    }
   }
 
   /**
@@ -2835,19 +2929,54 @@ class Player extends Component {
    *
    * @listens keydown
    */
-  handleKeyPress(event) {
+  handleKeyDown(event) {
+    const {userActions} = this.options_;
 
-    if (this.options_.userActions && this.options_.userActions.hotkeys && (this.options_.userActions.hotkeys !== false)) {
+    // Bail out if hotkeys are not configured.
+    if (!userActions || !userActions.hotkeys) {
+      return;
+    }
 
-      if (typeof this.options_.userActions.hotkeys === 'function') {
+    // Function that determines whether or not to exclude an element from
+    // hotkeys handling.
+    const excludeElement = (el) => {
+      const tagName = el.tagName.toLowerCase();
 
-        this.options_.userActions.hotkeys.call(this, event);
-
-      } else {
-
-        this.handleHotkeys(event);
-
+      // The first and easiest test is for `contenteditable` elements.
+      if (el.isContentEditable) {
+        return true;
       }
+
+      // Inputs matching these types will still trigger hotkey handling as
+      // they are not text inputs.
+      const allowedInputTypes = [
+        'button',
+        'checkbox',
+        'hidden',
+        'radio',
+        'reset',
+        'submit'
+      ];
+
+      if (tagName === 'input') {
+        return allowedInputTypes.indexOf(el.type) === -1;
+      }
+
+      // The final test is by tag name. These tags will be excluded entirely.
+      const excludedTags = ['textarea'];
+
+      return excludedTags.indexOf(tagName) !== -1;
+    };
+
+    // Bail out if the user is focused on an interactive form element.
+    if (excludeElement(this.el_.ownerDocument.activeElement)) {
+      return;
+    }
+
+    if (typeof userActions.hotkeys === 'function') {
+      userActions.hotkeys.call(this, event);
+    } else {
+      this.handleHotkeys(event);
     }
   }
 
@@ -2873,30 +3002,30 @@ class Player extends Component {
     } = hotkeys;
 
     if (fullscreenKey.call(this, event)) {
-
       event.preventDefault();
+      event.stopPropagation();
 
       const FSToggle = Component.getComponent('FullscreenToggle');
 
-      if (document[FullscreenApi.fullscreenEnabled] !== false) {
-        FSToggle.prototype.handleClick.call(this);
+      if (document[this.fsApi_.fullscreenEnabled] !== false) {
+        FSToggle.prototype.handleClick.call(this, event);
       }
 
     } else if (muteKey.call(this, event)) {
-
       event.preventDefault();
+      event.stopPropagation();
 
       const MuteToggle = Component.getComponent('MuteToggle');
 
-      MuteToggle.prototype.handleClick.call(this);
+      MuteToggle.prototype.handleClick.call(this, event);
 
     } else if (playPauseKey.call(this, event)) {
-
       event.preventDefault();
+      event.stopPropagation();
 
       const PlayToggle = Component.getComponent('PlayToggle');
 
-      PlayToggle.prototype.handleClick.call(this);
+      PlayToggle.prototype.handleClick.call(this, event);
     }
   }
 
@@ -3580,6 +3709,23 @@ class Player extends Component {
       return this.error_ || null;
     }
 
+    // Suppress the first error message for no compatible source until
+    // user interaction
+    if (this.options_.suppressNotSupportedError &&
+        err && err.code === 4
+    ) {
+      const triggerSuppressedError = function() {
+        this.error(err);
+      };
+
+      this.options_.suppressNotSupportedError = false;
+      this.any(['click', 'touchstart'], triggerSuppressedError);
+      this.one('loadstart', function() {
+        this.off(['click', 'touchstart'], triggerSuppressedError);
+      });
+      return;
+    }
+
     // restoring to default
     if (err === null) {
       this.error_ = err;
@@ -3714,7 +3860,7 @@ class Player extends Component {
       mouseInProgress = this.setInterval(handleActivity, 250);
     };
 
-    const handleMouseUp = function(event) {
+    const handleMouseUpAndMouseLeave = function(event) {
       handleActivity();
       // Stop the interval that maintains activity if the mouse/touch is down
       this.clearInterval(mouseInProgress);
@@ -3723,7 +3869,8 @@ class Player extends Component {
     // Any mouse movement will be considered user activity
     this.on('mousedown', handleMouseDown);
     this.on('mousemove', handleMouseMove);
-    this.on('mouseup', handleMouseUp);
+    this.on('mouseup', handleMouseUpAndMouseLeave);
+    this.on('mouseleave', handleMouseUpAndMouseLeave);
 
     const controlBar = this.getChild('controlBar');
 
@@ -4559,6 +4706,12 @@ Player.prototype.options_ = {
 
   // Default message to show when a video cannot be played.
   notSupportedMessage: 'No compatible source was found for this media.',
+
+  fullscreen: {
+    options: {
+      navigationUI: 'hide'
+    }
+  },
 
   breakpoints: {},
   responsive: false
